@@ -1,0 +1,75 @@
+steps:
+- name: build
+  image: plugins/docker
+  secrets: [docker_password]
+  settings:
+    registry: https://us-west4-docker.pkg.dev
+    repo: us-west4-docker.pkg.dev/mbvt-429505/demo/flask-todolist
+    location: us
+    dockerfile: Dockerfile
+    platforms: linux/amd64
+    tags:
+      - "${CI_COMMIT_SHA:0:8}"
+    debug: true
+    json_key:
+      from_secret: docker_password
+    username: _json_key
+- name: update_k8s_pr
+  image: ghcr.io/excedrin/woodpecker-plugin:latest
+  secrets: [app_private_key]
+  settings:
+    github_org: Excedrin
+    app_id: 948697
+    app_private_key:
+      from_secret: app_private_key
+    image_tag: "${CI_COMMIT_SHA:0:8}"
+    application: flask-todolist
+    environment: internal-dev
+    base_branch: main
+    new_branch_prefix: update-flask-todo
+    repo: us-west4-docker.pkg.dev/mbvt-429505/demo/flask-todolist
+    base_image: todolist
+    k8s_repo: https://github.com/Excedrin/mbvt-k8s.git
+    mode: push # can be "pull-request"
+    script: |
+      # Log in to GitHub using the app
+      gh_app_login
+
+      # Clone the repository
+      git clone --depth 1 "$${PLUGIN_K8S_REPO}"
+      cd mbvt-k8s
+
+      # Configure git user
+      git config --global user.email 'woodpecker@ci'
+      git config --global user.name 'woodpecker'
+
+      if [ "$${PLUGIN_MODE}" == "pull-request" ]; then
+        export BRANCH="$${PLUGIN_NEW_BRANCH_PREFIX}-$${PLUGIN_IMAGE_TAG}"
+        # Make a branch
+        git checkout -b "$${BRANCH}"
+      else
+        export BRANCH="$${PLUGIN_BASE_BRANCH}"
+      fi
+
+      # Navigate to the correct environment's directory
+      cd "applications/$${PLUGIN_APPLICATION}/overlays/$${PLUGIN_ENVIRONMENT}/"
+
+      # Update manifest
+      if [ -n "$${PLUGIN_BASE_IMAGE}" ]; then
+        kustomize edit set image "$${PLUGIN_BASE_IMAGE}=$${PLUGIN_REPO}:$${PLUGIN_IMAGE_TAG}"
+      else
+        kustomize edit set image "$${PLUGIN_REPO}:$${PLUGIN_IMAGE_TAG}"
+      fi
+
+      # Commit
+      export PR_BODY="Automated deploy of $${PLUGIN_APPLICATION}:$${PLUGIN_IMAGE_TAG} to $${PLUGIN_ENVIRONMENT}."
+      export PR_TITLE="[Woodpecker] $${PR_BODY}"
+
+      git commit -a -m "$${PR_TITLE}"
+      git push origin "$${BRANCH}"
+
+      if [ "$${PLUGIN_MODE}" == "pull-request" ]; then
+        gh pr create --title "$${PR_TITLE}" --body "$${PR_BODY}" --head "$${BRANCH}" --base "$${PLUGIN_BASE_BRANCH}"
+      fi
+
+      # the end
